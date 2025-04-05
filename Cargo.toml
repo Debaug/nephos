@@ -1,0 +1,13 @@
+[package]
+name = "nephos"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+color-eyre = "0.6.3"
+futures = { version = "0.3.31", features = ["executor"] }
+log = "0.4.27"
+thiserror = "2.0.12"
+tokio = { version = "1.44.2", features = ["rt"] }
+wgpu = "24.0.3"
+winit = "0.30.9"
