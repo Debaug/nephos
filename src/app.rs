@@ -1,19 +1,27 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use color_eyre::eyre::Result;
+use glam::Affine2;
 use log::error;
 use thiserror::Error;
-use tokio::task::{self, JoinHandle};
 use wgpu::{
-    Adapter, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, Queue,
-    RequestAdapterOptions, RequestAdapterOptionsBase, Surface, SurfaceConfiguration, TextureUsages,
+    Adapter, Backends, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, Queue,
+    RequestAdapterOptions, Surface, SurfaceConfiguration, TextureUsages,
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
+    dpi::{PhysicalSize, Size},
     event::WindowEvent,
-    event_loop::{self, ActiveEventLoop, EventLoop},
+    event_loop::{self, ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowAttributes},
+};
+
+use crate::{
+    render::Renderer,
+    sim::{Point, Simulation},
 };
 
 #[derive(Debug)]
@@ -26,6 +34,10 @@ pub struct App {
 struct AppInner {
     instance: Instance,
     window_app: Option<WindowApp>,
+    delta_time: Duration,
+    points: Vec<Point>,
+    maps: Vec<Affine2>,
+    last_tick: Instant,
 }
 
 #[derive(Debug)]
@@ -36,21 +48,23 @@ struct WindowApp {
     window: Arc<Window>,
     surface_configuration: SurfaceConfiguration,
     surface: Surface<'static>,
+    simulation: Simulation,
+    renderer: Renderer,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Context<'app> {
-    instance: &'app Instance,
-    adapter: &'app Adapter,
-    device: &'app Device,
-    queue: &'app Queue,
-    window: &'app Window,
-    surface: &'app Surface<'static>,
-    surface_configuration: &'app SurfaceConfiguration,
+    pub instance: &'app Instance,
+    pub adapter: &'app Adapter,
+    pub device: &'app Device,
+    pub queue: &'app Queue,
+    pub window: &'app Window,
+    pub surface: &'app Surface<'static>,
+    pub surface_configuration: &'app SurfaceConfiguration,
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(delta_time: Duration, points: Vec<Point>, maps: Vec<Affine2>) -> Result<Self> {
         let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::all(),
             ..Default::default()
@@ -64,6 +78,10 @@ impl App {
             inner: AppInner {
                 instance,
                 window_app: None,
+                delta_time,
+                points,
+                maps,
+                last_tick: Instant::now(),
             },
         })
     }
@@ -72,27 +90,37 @@ impl App {
         self.event_loop.run_app(&mut self.inner)?;
         Ok(())
     }
+}
 
-    fn context(&self) -> Option<Context> {
-        let window_app = self.inner.window_app.as_ref()?;
-        Some(Context {
-            instance: &self.inner.instance,
-            adapter: &window_app.adapter,
-            device: &window_app.device,
-            queue: &window_app.queue,
-            window: &window_app.window,
-            surface: &window_app.surface,
-            surface_configuration: &window_app.surface_configuration,
-        })
+impl AppInner {
+    fn tick(&mut self) -> Result<()> {
+        let Some(window_app) = &mut self.window_app else {
+            return Ok(());
+        };
+        let context = window_app.as_context(&self.instance);
+        window_app.simulation.step(context);
+        window_app
+            .renderer
+            .render(window_app.simulation.points(), context)?;
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, Copy, Error)]
-#[error("no adapter")]
+#[error("no compatible adapter")]
 pub struct NoAdapter;
 
+#[derive(Debug, Clone, Copy, Error)]
+#[error("no compatible device")]
+pub struct NoDevice;
+
 impl WindowApp {
-    async fn new(instance: &Instance, window: Window) -> Result<Self> {
+    async fn new(
+        instance: &Instance,
+        window: Window,
+        points: &[Point],
+        maps: impl IntoIterator<Item = Affine2>,
+    ) -> Result<Self> {
         let window = Arc::new(window);
 
         let surface = instance.create_surface(Arc::clone(&window))?;
@@ -108,7 +136,8 @@ impl WindowApp {
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
-                    label: Some("device"),
+                    label: Some("Device"),
+                    required_features: Features::PUSH_CONSTANTS,
                     ..Default::default()
                 },
                 None,
@@ -129,6 +158,20 @@ impl WindowApp {
         };
         surface.configure(&device, &surface_configuration);
 
+        let context = Context {
+            instance,
+            adapter: &adapter,
+            device: &device,
+            queue: &queue,
+            window: &window,
+            surface: &surface,
+            surface_configuration: &surface_configuration,
+        };
+
+        let simulation = Simulation::new(points, maps, context);
+
+        let renderer = Renderer::new(context);
+
         Ok(WindowApp {
             adapter,
             device,
@@ -136,7 +179,32 @@ impl WindowApp {
             window,
             surface,
             surface_configuration,
+            simulation,
+            renderer,
         })
+    }
+
+    fn from_event_loop_blocking(
+        instance: &Instance,
+        event_loop: &ActiveEventLoop,
+        size: impl Into<Size>,
+        points: &[Point],
+        maps: impl IntoIterator<Item = Affine2>,
+    ) -> Result<Self> {
+        let window = event_loop.create_window(WindowAttributes::default().with_inner_size(size))?;
+        futures::executor::block_on(WindowApp::new(instance, window, points, maps))
+    }
+
+    fn as_context<'app>(&'app self, instance: &'app Instance) -> Context<'app> {
+        Context {
+            instance,
+            adapter: &self.adapter,
+            device: &self.device,
+            queue: &self.queue,
+            window: &self.window,
+            surface: &self.surface,
+            surface_configuration: &self.surface_configuration,
+        }
     }
 
     fn resize(&mut self) {
@@ -150,28 +218,21 @@ impl WindowApp {
 
 impl ApplicationHandler for AppInner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window_app.is_some() {
-            return;
+        if self.window_app.is_none() {
+            match WindowApp::from_event_loop_blocking(
+                &self.instance,
+                event_loop,
+                PhysicalSize::new(800, 800),
+                &self.points,
+                self.maps.iter().copied(),
+            ) {
+                Err(error) => {
+                    error!("failed to create window: {error}");
+                    event_loop.exit();
+                }
+                Ok(window_app) => self.window_app = Some(window_app),
+            }
         }
-
-        let window = match event_loop
-            .create_window(WindowAttributes::default().with_inner_size(PhysicalSize::new(800, 800)))
-        {
-            Ok(window) => window,
-            Err(err) => {
-                error!("failed to create window: {err}");
-                event_loop.exit();
-                return;
-            }
-        };
-
-        match futures::executor::block_on(WindowApp::new(&self.instance, window)) {
-            Ok(window_app) => self.window_app = Some(window_app),
-            Err(err) => {
-                error!("failed to initialize app: {err}");
-                event_loop.exit();
-            }
-        };
     }
 
     fn window_event(
@@ -188,7 +249,24 @@ impl ApplicationHandler for AppInner {
         match event {
             E::Resized(_) => window_app.resize(),
             E::CloseRequested => event_loop.exit(),
+            E::RedrawRequested => {
+                window_app.window.pre_present_notify();
+                if let Err(error) = self.tick() {
+                    error!("failed to compute or draw the next animation frame: {error}");
+                }
+            }
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window_app) = &self.window_app {
+            let now = Instant::now();
+            if now - self.last_tick >= self.delta_time {
+                window_app.window.request_redraw();
+                self.last_tick = now;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.delta_time));
+            }
         }
     }
 }
