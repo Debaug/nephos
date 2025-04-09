@@ -1,12 +1,13 @@
-use std::iter;
+use std::{iter, mem, num::NonZero};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec2, Vec4};
 use itertools::Itertools;
 use wgpu::{
-    include_wgsl, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, CommandEncoderDescriptor,
-    ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, PipelineCompilationOptions,
+    include_wgsl, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BufferBinding,
+    BufferBindingType, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, PipelineCompilationOptions,
     PipelineLayoutDescriptor, ShaderStages,
 };
 
@@ -25,10 +26,11 @@ struct WgpuMat3x3([Vec4; 3]);
 #[derive(Debug)]
 pub struct Simulation {
     points: Buffer<Point>,
+    point_bind_group: Vec<(BindGroup, u32)>,
     _maps: Buffer<WgpuMat3x3>,
+    map_bind_group: BindGroup,
     _map_indices: Buffer<u32>,
     pipeline: ComputePipeline,
-    bind_group: BindGroup,
 }
 
 impl Simulation {
@@ -39,6 +41,8 @@ impl Simulation {
             BufferUsages::STORAGE | BufferUsages::VERTEX,
             context,
         );
+
+        let (point_bind_group_layout, point_bind_group) = Self::point_bind_groups(&points, context);
 
         let maps_gpu_repr: Vec<WgpuMat3x3> = maps
             .iter()
@@ -76,72 +80,14 @@ impl Simulation {
             context,
         );
 
-        let bind_group_layout =
-            context
-                .device
-                .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: Some("Simulation Compute Pipeline Bind Group Layout"),
-                    entries: &[
-                        // points
-                        BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        // maps
-                        BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        // map indices
-                        BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
-        let bind_group = context.device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Simulation Compute Pipeline Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: points.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: map_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: map_indices.as_entire_binding(),
-                },
-            ],
-        });
+        let (map_bind_group_layout, map_bind_group) =
+            Self::map_bind_group(&map_buffer, &map_indices, context);
 
         let pipeline_layout = context
             .device
             .create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("Simulation Compute Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[&map_bind_group_layout, &point_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -165,29 +111,146 @@ impl Simulation {
             _maps: map_buffer,
             _map_indices: map_indices,
             pipeline,
-            bind_group,
+            point_bind_group,
+            map_bind_group,
         }
     }
 
+    fn map_bind_group(
+        maps: &Buffer<WgpuMat3x3>,
+        map_indices: &Buffer<u32>,
+        context: Context,
+    ) -> (BindGroupLayout, BindGroup) {
+        let map_bind_group_layout =
+            context
+                .device
+                .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Simulation Compute Pipeline Bind Group Layout for Linear Maps"),
+                    entries: &[
+                        // maps
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        // map indices
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let map_bind_group = context.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Simulation Compute Pipeline Bind Group for Linear Maps"),
+            layout: &map_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: maps.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: map_indices.as_entire_binding(),
+                },
+            ],
+        });
+
+        (map_bind_group_layout, map_bind_group)
+    }
+
+    fn point_bind_groups(
+        points: &Buffer<Point>,
+        context: Context,
+    ) -> (BindGroupLayout, Vec<(BindGroup, u32)>) {
+        const MAX_WORKGROUPS_PER_DISPATCH_UNALIGNED: u32 = u16::MAX as u32;
+        let alignment = context.device.limits().min_storage_buffer_offset_alignment;
+        let max_workgroups_per_dispatch =
+            (MAX_WORKGROUPS_PER_DISPATCH_UNALIGNED / alignment) * alignment;
+
+        let n_max = points.len_u32() / max_workgroups_per_dispatch;
+        let rem = points.len_u32() % max_workgroups_per_dispatch;
+
+        let point_bind_group_layout =
+            context
+                .device
+                .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Simulation Compute Pipeline Bind Group Layout for Points"),
+                    entries: &[BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+
+        let point_bind_groups = iter::repeat_n(max_workgroups_per_dispatch, n_max as usize)
+            .chain([rem])
+            .scan(0, |start, len| {
+                let this_start = *start;
+                *start += len;
+                Some((this_start, len))
+            })
+            .enumerate()
+            .map(|(idx, (start, len))| {
+                let bind_group = context.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some(&format!(
+                        "Simulation Compute Pipeline Bind Group for Points (Chunk #{idx})"
+                    )),
+                    layout: &point_bind_group_layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::Buffer(BufferBinding {
+                            buffer: points,
+                            offset: u64::from(start) * mem::size_of::<Point>() as u64,
+                            size: NonZero::new(u64::from(len) * mem::size_of::<Point>() as u64),
+                        }),
+                    }],
+                });
+                (bind_group, len)
+            })
+            .collect();
+
+        (point_bind_group_layout, point_bind_groups)
+    }
+
     pub fn step(&self, context: Context<'_>) {
-        let mut encoder = context
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Simulation Command Encoder"),
-            });
+        for (idx, &(ref point_bind_group, len)) in self.point_bind_group.iter().enumerate() {
+            let mut encoder = context
+                .device
+                .create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some(&format!("Simulation Command Encoder for Chunk #{idx}")),
+                });
 
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("Simulation Compute Pass"),
-                timestamp_writes: None,
-            });
+            {
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some(&format!("Simulation Compute Pass for Chunk #{idx}")),
+                    timestamp_writes: None,
+                });
 
-            compute_pass.set_pipeline(&self.pipeline);
-            compute_pass.set_bind_group(0, &self.bind_group, &[]);
-            compute_pass.dispatch_workgroups(self.points.len_u32(), 1, 1);
+                compute_pass.set_pipeline(&self.pipeline);
+                compute_pass.set_bind_group(0, &self.map_bind_group, &[]);
+                compute_pass.set_bind_group(1, point_bind_group, &[]);
+                compute_pass.dispatch_workgroups(len, 1, 1);
+            }
+
+            context.queue.submit(iter::once(encoder.finish()));
         }
-
-        context.queue.submit(iter::once(encoder.finish()));
     }
 
     pub fn points(&self) -> &Buffer<Point> {

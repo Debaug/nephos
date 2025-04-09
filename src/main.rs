@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     let points: Vec<_> = iter::repeat_with(|| Point {
         position: Vec2::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)),
     })
-    .take(10000)
+    .take(200000)
     .collect();
 
     App::new(Duration::from_millis(200), points, Sierpinski)?.run()

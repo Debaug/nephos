@@ -25,6 +25,7 @@ impl<T: Pod> Buffer<T> {
             contents: bytes,
             usage,
         });
+
         Self {
             buffer,
             _marker: PhantomData,
