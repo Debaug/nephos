@@ -4,7 +4,6 @@ use std::{
 };
 
 use color_eyre::eyre::Result;
-use glam::Affine2;
 use log::error;
 use thiserror::Error;
 use wgpu::{
@@ -13,13 +12,14 @@ use wgpu::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::{PhysicalSize, Size},
+    dpi::{LogicalSize, PhysicalSize, Size},
     event::WindowEvent,
     event_loop::{self, ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowAttributes},
 };
 
 use crate::{
+    map::{Map, Maps},
     render::Renderer,
     sim::{Point, Simulation},
 };
@@ -36,7 +36,7 @@ struct AppInner {
     window_app: Option<WindowApp>,
     delta_time: Duration,
     points: Vec<Point>,
-    maps: Vec<Affine2>,
+    maps: Vec<Map>,
     last_tick: Instant,
 }
 
@@ -64,7 +64,7 @@ pub struct Context<'app> {
 }
 
 impl App {
-    pub fn new(delta_time: Duration, points: Vec<Point>, maps: Vec<Affine2>) -> Result<Self> {
+    pub fn new(delta_time: Duration, points: Vec<Point>, maps: impl Maps) -> Result<Self> {
         let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::all(),
             ..Default::default()
@@ -80,7 +80,7 @@ impl App {
                 window_app: None,
                 delta_time,
                 points,
-                maps,
+                maps: maps.into_maps(),
                 last_tick: Instant::now(),
             },
         })
@@ -119,7 +119,7 @@ impl WindowApp {
         instance: &Instance,
         window: Window,
         points: &[Point],
-        maps: impl IntoIterator<Item = Affine2>,
+        maps: &[Map],
     ) -> Result<Self> {
         let window = Arc::new(window);
 
@@ -189,7 +189,7 @@ impl WindowApp {
         event_loop: &ActiveEventLoop,
         size: impl Into<Size>,
         points: &[Point],
-        maps: impl IntoIterator<Item = Affine2>,
+        maps: &[Map],
     ) -> Result<Self> {
         let window = event_loop.create_window(WindowAttributes::default().with_inner_size(size))?;
         futures::executor::block_on(WindowApp::new(instance, window, points, maps))
@@ -222,9 +222,9 @@ impl ApplicationHandler for AppInner {
             match WindowApp::from_event_loop_blocking(
                 &self.instance,
                 event_loop,
-                PhysicalSize::new(800, 800),
+                LogicalSize::new(600, 600),
                 &self.points,
-                self.maps.iter().copied(),
+                &self.maps,
             ) {
                 Err(error) => {
                     error!("failed to create window: {error}");

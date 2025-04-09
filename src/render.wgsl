@@ -1,4 +1,5 @@
 @vertex fn vertex(@location(0) point: vec2<f32>) -> @builtin(position) vec4<f32> {
+    // return vec4<f32>(point / 8.0, 0.0, 1.0) + vec4(0.0, -1.0, 0.0, 0.0);
     return vec4<f32>(point, 0.0, 1.0);
 }
 
