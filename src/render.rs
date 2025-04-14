@@ -1,27 +1,40 @@
-use std::{future::Future, iter, mem};
+use std::{borrow::Cow, future::Future, iter, mem};
 
-use color_eyre::eyre::{Ok, Result};
-use futures::FutureExt;
 use wgpu::{
     include_wgsl, BlendState, BufferAddress, Color, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, FragmentState, LoadOp, Operations, PipelineLayoutDescriptor,
     PrimitiveState, PrimitiveTopology, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, StoreOp, SurfaceTexture, TextureFormat, TextureView,
+    RenderPipelineDescriptor, StoreOp, SurfaceTexture, Texture, TextureFormat, TextureView,
     TextureViewDescriptor, VertexBufferLayout, VertexState,
 };
 
 use crate::{app::Context, buffer::Buffer, sim::Point};
 
 pub trait RenderTarget: Send + 'static {
-    fn view(&self) -> TextureView;
+    fn texture_view(&self) -> Cow<TextureView>;
 }
 
 impl RenderTarget for SurfaceTexture {
-    fn view(&self) -> TextureView {
-        self.texture.create_view(&TextureViewDescriptor {
+    fn texture_view(&self) -> Cow<TextureView> {
+        Cow::Owned(self.texture.create_view(&TextureViewDescriptor {
             label: Some("Surface Texture View"),
             ..Default::default()
-        })
+        }))
+    }
+}
+
+impl RenderTarget for Texture {
+    fn texture_view(&self) -> Cow<TextureView> {
+        Cow::Owned(self.create_view(&TextureViewDescriptor {
+            label: Some("Texture View"),
+            ..Default::default()
+        }))
+    }
+}
+
+impl RenderTarget for TextureView {
+    fn texture_view(&self) -> Cow<TextureView> {
+        Cow::Borrowed(self)
     }
 }
 
@@ -32,6 +45,8 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(context: Context, texture_format: TextureFormat) -> Self {
+        dbg!(texture_format);
+
         let pipeline_layout = context
             .device()
             .create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -89,8 +104,8 @@ impl Renderer {
         points: &Buffer<Point>,
         target: &T,
         context: Context,
-    ) -> impl Future<Output = Result<()>> + 'static {
-        let texture_view = target.view();
+    ) -> impl Future<Output = ()> + 'static {
+        let texture_view = target.texture_view();
 
         let mut encoder = context
             .device()
@@ -117,9 +132,6 @@ impl Renderer {
             render_pass.draw(0..points.len_u32(), 0..1);
         }
 
-        context
-            .queue()
-            .submit(iter::once(encoder.finish()))
-            .then(|_| async { Ok(()) })
+        context.queue().submit(iter::once(encoder.finish()))
     }
 }

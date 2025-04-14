@@ -1,8 +1,7 @@
-use std::time::Duration;
-
+use clap::Parser;
 use color_eyre::eyre::Result;
-use nephos::{apps::basic, map::Sierpinski};
+use nephos::Cli;
 
 fn main() -> Result<()> {
-    basic::run(Sierpinski, 1000, Duration::from_millis(200))
+    Cli::try_parse()?.run()
 }
