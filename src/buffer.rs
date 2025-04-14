@@ -1,14 +1,12 @@
 use std::{marker::PhantomData, mem, ops::Deref};
 
 use bytemuck::Pod;
-use wgpu::{
-    util::{BufferInitDescriptor, DeviceExt},
-    BufferUsages,
-};
+use wgpu::{util::BufferInitDescriptor, BufferUsages};
+use wgpu_async::AsyncBuffer;
 
 use crate::app::Context;
 
-pub type UntypedBuffer = wgpu::Buffer;
+pub type UntypedBuffer = AsyncBuffer;
 
 #[derive(Debug)]
 pub struct Buffer<T: Pod> {
@@ -20,7 +18,7 @@ impl<T: Pod> Buffer<T> {
     pub fn new(data: &[T], label: Option<&str>, usage: BufferUsages, context: Context) -> Self {
         let bytes = bytemuck::cast_slice(data);
         assert!(u32::try_from(bytes.len()).is_ok());
-        let buffer = context.device.create_buffer_init(&BufferInitDescriptor {
+        let buffer = context.device().create_buffer_init(&BufferInitDescriptor {
             label,
             contents: bytes,
             usage,
@@ -53,5 +51,11 @@ impl<T: Pod> Deref for Buffer<T> {
     type Target = UntypedBuffer;
     fn deref(&self) -> &Self::Target {
         self.as_untyped()
+    }
+}
+
+impl<T: Pod> AsRef<Buffer<T>> for Buffer<T> {
+    fn as_ref(&self) -> &Buffer<T> {
+        self
     }
 }

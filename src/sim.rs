@@ -1,7 +1,9 @@
-use std::{iter, mem, num::NonZero};
+use std::{future::Future, iter, mem, num::NonZero};
 
 use bytemuck::{Pod, Zeroable};
+use futures::FutureExt;
 use glam::{Mat3, Vec2, Vec4};
+
 use itertools::Itertools;
 use wgpu::{
     include_wgsl, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -24,8 +26,8 @@ pub struct Point {
 struct WgpuMat3x3([Vec4; 3]);
 
 #[derive(Debug)]
-pub struct Simulation {
-    points: Buffer<Point>,
+pub struct Simulation<P: AsRef<Buffer<Point>>> {
+    points: P,
     point_bind_group: Vec<(BindGroup, u32)>,
     _maps: Buffer<WgpuMat3x3>,
     map_bind_group: BindGroup,
@@ -33,16 +35,12 @@ pub struct Simulation {
     pipeline: ComputePipeline,
 }
 
-impl Simulation {
-    pub fn new(points: &[Point], maps: &[Map], context: Context) -> Self {
-        let points = Buffer::new(
-            points,
-            Some("Points"),
-            BufferUsages::STORAGE | BufferUsages::VERTEX,
-            context,
-        );
+impl<P: AsRef<Buffer<Point>>> Simulation<P> {
+    pub fn new(points: P, maps: &[Map], context: Context) -> Self {
+        let points_buf = points.as_ref();
 
-        let (point_bind_group_layout, point_bind_group) = Self::point_bind_groups(&points, context);
+        let (point_bind_group_layout, point_bind_group) =
+            Self::point_bind_groups(points_buf, context.borrow());
 
         let maps_gpu_repr: Vec<WgpuMat3x3> = maps
             .iter()
@@ -55,7 +53,12 @@ impl Simulation {
                 ])
             })
             .collect();
-        let map_buffer = Buffer::new(&maps_gpu_repr, Some("Maps"), BufferUsages::STORAGE, context);
+        let map_buffer = Buffer::new(
+            &maps_gpu_repr,
+            Some("Maps"),
+            BufferUsages::STORAGE,
+            context.borrow(),
+        );
 
         const MAP_INDEX_ARRAY_LEN: usize = 144;
 
@@ -77,14 +80,14 @@ impl Simulation {
             &map_index_array,
             Some("Map Indices"),
             BufferUsages::STORAGE,
-            context,
+            context.borrow(),
         );
 
         let (map_bind_group_layout, map_bind_group) =
-            Self::map_bind_group(&map_buffer, &map_indices, context);
+            Self::map_bind_group(&map_buffer, &map_indices, context.borrow());
 
         let pipeline_layout = context
-            .device
+            .device()
             .create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("Simulation Compute Pipeline Layout"),
                 bind_group_layouts: &[&map_bind_group_layout, &point_bind_group_layout],
@@ -92,11 +95,11 @@ impl Simulation {
             });
 
         let shader = context
-            .device
+            .device()
             .create_shader_module(include_wgsl!("sim.wgsl"));
 
         let pipeline = context
-            .device
+            .device()
             .create_compute_pipeline(&ComputePipelineDescriptor {
                 label: Some("Simulation Compute Pipeline"),
                 layout: Some(&pipeline_layout),
@@ -123,7 +126,7 @@ impl Simulation {
     ) -> (BindGroupLayout, BindGroup) {
         let map_bind_group_layout =
             context
-                .device
+                .device()
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("Simulation Compute Pipeline Bind Group Layout for Linear Maps"),
                     entries: &[
@@ -152,7 +155,7 @@ impl Simulation {
                     ],
                 });
 
-        let map_bind_group = context.device.create_bind_group(&BindGroupDescriptor {
+        let map_bind_group = context.device().create_bind_group(&BindGroupDescriptor {
             label: Some("Simulation Compute Pipeline Bind Group for Linear Maps"),
             layout: &map_bind_group_layout,
             entries: &[
@@ -175,7 +178,10 @@ impl Simulation {
         context: Context,
     ) -> (BindGroupLayout, Vec<(BindGroup, u32)>) {
         const MAX_WORKGROUPS_PER_DISPATCH_UNALIGNED: u32 = u16::MAX as u32;
-        let alignment = context.device.limits().min_storage_buffer_offset_alignment;
+        let alignment = context
+            .device()
+            .limits()
+            .min_storage_buffer_offset_alignment;
         let max_workgroups_per_dispatch =
             (MAX_WORKGROUPS_PER_DISPATCH_UNALIGNED / alignment) * alignment;
 
@@ -184,7 +190,7 @@ impl Simulation {
 
         let point_bind_group_layout =
             context
-                .device
+                .device()
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("Simulation Compute Pipeline Bind Group Layout for Points"),
                     entries: &[BindGroupLayoutEntry {
@@ -208,7 +214,7 @@ impl Simulation {
             })
             .enumerate()
             .map(|(idx, (start, len))| {
-                let bind_group = context.device.create_bind_group(&BindGroupDescriptor {
+                let bind_group = context.device().create_bind_group(&BindGroupDescriptor {
                     label: Some(&format!(
                         "Simulation Compute Pipeline Bind Group for Points (Chunk #{idx})"
                     )),
@@ -229,10 +235,10 @@ impl Simulation {
         (point_bind_group_layout, point_bind_groups)
     }
 
-    pub fn step(&self, context: Context<'_>) {
+    pub fn step(&self, context: Context<'_>) -> impl Future<Output = ()> + 'static {
         for (idx, &(ref point_bind_group, len)) in self.point_bind_group.iter().enumerate() {
             let mut encoder = context
-                .device
+                .device()
                 .create_command_encoder(&CommandEncoderDescriptor {
                     label: Some(&format!("Simulation Command Encoder for Chunk #{idx}")),
                 });
@@ -249,11 +255,41 @@ impl Simulation {
                 compute_pass.dispatch_workgroups(len, 1, 1);
             }
 
-            context.queue.submit(iter::once(encoder.finish()));
+            context.queue().submit(iter::once(encoder.finish()));
         }
+
+        let futures = self
+            .point_bind_group
+            .iter()
+            .enumerate()
+            .map(|(idx, &(ref point_bind_group, len))| {
+                let mut encoder =
+                    context
+                        .device()
+                        .create_command_encoder(&CommandEncoderDescriptor {
+                            label: Some(&format!("Simulation Command Encoder for Chunk #{idx}")),
+                        });
+
+                {
+                    let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some(&format!("Simulation Compute Pass for Chunk #{idx}")),
+                        timestamp_writes: None,
+                    });
+
+                    compute_pass.set_pipeline(&self.pipeline);
+                    compute_pass.set_bind_group(0, &self.map_bind_group, &[]);
+                    compute_pass.set_bind_group(1, point_bind_group, &[]);
+                    compute_pass.dispatch_workgroups(len, 1, 1);
+                }
+
+                context.queue().submit(iter::once(encoder.finish()))
+            })
+            .collect_vec();
+
+        futures::future::join_all(futures).then(|_| async {})
     }
 
-    pub fn points(&self) -> &Buffer<Point> {
+    pub fn points(&self) -> &P {
         &self.points
     }
 }

@@ -9,10 +9,12 @@ color-eyre = "0.6.3"
 env_logger = "0.11.8"
 futures = { version = "0.3.31", features = ["executor"] }
 glam = { version = "0.30.1", features = ["bytemuck"] }
+image = "0.25.6"
 itertools = "0.14.0"
 log = "0.4.27"
 rand = "0.9.0"
 thiserror = "2.0.12"
-tokio = { version = "1.44.2", features = ["rt"] }
+tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread", "time"] }
 wgpu = "24.0.3"
+wgpu-async = "24.0.3"
 winit = "0.30.9"

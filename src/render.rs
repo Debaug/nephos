@@ -1,14 +1,29 @@
-use std::{iter, mem};
+use std::{future::Future, iter, mem};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Ok, Result};
+use futures::FutureExt;
 use wgpu::{
     include_wgsl, BlendState, BufferAddress, Color, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, FragmentState, LoadOp, Operations, PipelineLayoutDescriptor,
     PrimitiveState, PrimitiveTopology, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, StoreOp, TextureViewDescriptor, VertexBufferLayout, VertexState,
+    RenderPipelineDescriptor, StoreOp, SurfaceTexture, TextureFormat, TextureView,
+    TextureViewDescriptor, VertexBufferLayout, VertexState,
 };
 
 use crate::{app::Context, buffer::Buffer, sim::Point};
+
+pub trait RenderTarget: Send + 'static {
+    fn view(&self) -> TextureView;
+}
+
+impl RenderTarget for SurfaceTexture {
+    fn view(&self) -> TextureView {
+        self.texture.create_view(&TextureViewDescriptor {
+            label: Some("Surface Texture View"),
+            ..Default::default()
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Renderer {
@@ -16,9 +31,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(context: Context) -> Self {
+    pub fn new(context: Context, texture_format: TextureFormat) -> Self {
         let pipeline_layout = context
-            .device
+            .device()
             .create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
                 bind_group_layouts: &[],
@@ -26,7 +41,7 @@ impl Renderer {
             });
 
         let shader = context
-            .device
+            .device()
             .create_shader_module(include_wgsl!("render.wgsl"));
 
         let vertex_buffer_layout = VertexBufferLayout {
@@ -36,7 +51,7 @@ impl Renderer {
         };
 
         let pipeline = context
-            .device
+            .device()
             .create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some("Render Pipeline"),
                 layout: Some(&pipeline_layout),
@@ -49,7 +64,7 @@ impl Renderer {
                 fragment: Some(FragmentState {
                     module: &shader,
                     targets: &[Some(ColorTargetState {
-                        format: context.surface_configuration.format,
+                        format: texture_format,
                         blend: Some(BlendState::REPLACE),
                         write_mask: ColorWrites::ALL,
                     })],
@@ -69,15 +84,16 @@ impl Renderer {
         Self { pipeline }
     }
 
-    pub fn render(&self, points: &Buffer<Point>, context: Context) -> Result<()> {
-        let surface_texture = context.surface.get_current_texture()?;
-        let surface_texture_view = surface_texture.texture.create_view(&TextureViewDescriptor {
-            label: Some("Surface Output Texture View"),
-            ..Default::default()
-        });
+    pub fn render<T: RenderTarget + Clone>(
+        &self,
+        points: &Buffer<Point>,
+        target: &T,
+        context: Context,
+    ) -> impl Future<Output = Result<()>> + 'static {
+        let texture_view = target.view();
 
         let mut encoder = context
-            .device
+            .device()
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("Render Command Encoder"),
             });
@@ -86,7 +102,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_texture_view,
+                    view: &texture_view,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(Color::BLACK),
@@ -97,13 +113,13 @@ impl Renderer {
             });
 
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_vertex_buffer(0, points.slice(..));
+            render_pass.set_vertex_buffer(0, *points.slice(..));
             render_pass.draw(0..points.len_u32(), 0..1);
         }
 
-        context.queue.submit(iter::once(encoder.finish()));
-        surface_texture.present();
-
-        Ok(())
+        context
+            .queue()
+            .submit(iter::once(encoder.finish()))
+            .then(|_| async { Ok(()) })
     }
 }
