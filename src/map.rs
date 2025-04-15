@@ -19,20 +19,40 @@ impl From<Affine2> for Map {
     }
 }
 
-pub trait Maps {
-    fn into_maps(self) -> Vec<Map>;
+#[derive(Debug, Clone, Copy)]
+pub struct Rect {
+    pub min: Vec2,
+    pub max: Vec2,
 }
 
-impl Maps for Vec<Map> {
-    fn into_maps(self) -> Vec<Map> {
-        self
+impl Rect {
+    pub fn to_clip_transform(&self) -> Affine2 {
+        let midpoint = 0.5 * (self.min + self.max);
+        let scale = self.max - midpoint;
+        Affine2::from_scale_angle_translation(scale, 0.0, midpoint)
+    }
+}
+
+pub trait Maps {
+    fn region(&self) -> Rect {
+        Rect {
+            min: Vec2::NEG_ONE,
+            max: Vec2::ONE,
+        }
+    }
+    fn maps(&self) -> Vec<Map>;
+}
+
+impl Maps for [Map] {
+    fn maps(&self) -> Vec<Map> {
+        self.to_vec()
     }
 }
 
 pub struct Sierpinski;
 
 impl Maps for Sierpinski {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
         vec![
             Affine2::from_scale_angle_translation(Vec2::splat(0.5), 0.0, Vec2::new(0.0, 0.5))
                 .into(),
@@ -45,7 +65,7 @@ impl Maps for Sierpinski {
 pub struct Yang;
 
 impl Maps for Yang {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
         vec![
             Affine2::from_scale_angle_translation(Vec2::splat(0.9), -0.5, Vec2::new(0.0, 0.1))
                 .into(),
@@ -60,7 +80,7 @@ pub struct Polygon {
 }
 
 impl Maps for Polygon {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
         // based on https://en.wikipedia.org/wiki/Chaos_game
         let _r = match self.n % 4 {
             0 => 1.0 / (1.0 + f32::tan(f32::consts::PI / self.n as f32)),
@@ -76,7 +96,8 @@ impl Maps for Polygon {
 pub struct Barnsley;
 
 impl Maps for Barnsley {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
+        // based on https://en.wikipedia.org/wiki/Barnsley_fern
         vec![
             Map {
                 map: Affine2::from_mat2(mat2(
@@ -117,12 +138,19 @@ impl Maps for Barnsley {
             },
         ]
     }
+
+    fn region(&self) -> Rect {
+        Rect {
+            min: vec2(-5.0, 0.0),
+            max: vec2(5.0, 10.0),
+        }
+    }
 }
 
 pub struct SillySquare;
 
 impl Maps for SillySquare {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
         let next = Affine2::from_scale_angle_translation(
             Vec2::splat(0.5),
             f32::consts::FRAC_PI_6,
@@ -135,7 +163,7 @@ impl Maps for SillySquare {
 pub struct Patrick;
 
 impl Maps for Patrick {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
         vec![
             Affine2::from_scale_angle_translation(Vec2::splat(0.5), 0.0, Vec2::new(0.0, 0.5))
                 .into(),
@@ -149,7 +177,7 @@ impl Maps for Patrick {
 pub struct Disc;
 
 impl Maps for Disc {
-    fn into_maps(self) -> Vec<Map> {
+    fn maps(&self) -> Vec<Map> {
         vec![
             Affine2::from_scale_angle_translation(Vec2::splat(0.5), 0.0, Vec2::new(0.0, 0.5))
                 .into(),

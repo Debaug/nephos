@@ -1,8 +1,7 @@
 use std::{future::Future, iter, mem, num::NonZero};
 
 use bytemuck::{Pod, Zeroable};
-use futures::FutureExt;
-use glam::{Mat3, Vec2, Vec4};
+use glam::{Mat3, Vec2};
 
 use itertools::Itertools;
 use wgpu::{
@@ -13,7 +12,7 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderStages,
 };
 
-use crate::{app::Context, buffer::Buffer, map::Map};
+use crate::{app::Context, buffer::Buffer, map::Map, util::WgpuMat3x3};
 
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
 #[repr(C)]
@@ -21,14 +20,10 @@ pub struct Point {
     pub position: Vec2,
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod)]
-#[repr(C)]
-struct WgpuMat3x3([Vec4; 3]);
-
 #[derive(Debug)]
 pub struct Simulation<P: AsRef<Buffer<Point>>> {
     points: P,
-    point_bind_group: Vec<(BindGroup, u32)>,
+    point_bind_groups: Vec<(BindGroup, u32)>,
     _maps: Buffer<WgpuMat3x3>,
     map_bind_group: BindGroup,
     _map_indices: Buffer<u32>,
@@ -46,11 +41,7 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
             .iter()
             .map(|map| {
                 let mat: Mat3 = map.map.into();
-                WgpuMat3x3([
-                    mat.col(0).extend(0.0),
-                    mat.col(1).extend(0.0),
-                    mat.col(2).extend(0.0),
-                ])
+                WgpuMat3x3::from(mat)
             })
             .collect();
         let map_buffer = Buffer::new(
@@ -104,7 +95,7 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
                 label: Some("Simulation Compute Pipeline"),
                 layout: Some(&pipeline_layout),
                 module: &shader,
-                entry_point: None,
+                entry_point: Some("step_sim"),
                 compilation_options: PipelineCompilationOptions::default(),
                 cache: None,
             });
@@ -114,7 +105,7 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
             _maps: map_buffer,
             _map_indices: map_indices,
             pipeline,
-            point_bind_group,
+            point_bind_groups: point_bind_group,
             map_bind_group,
         }
     }
@@ -236,57 +227,36 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
     }
 
     pub fn step(&self, context: Context<'_>) -> impl Future<Output = ()> + 'static {
-        for (idx, &(ref point_bind_group, len)) in self.point_bind_group.iter().enumerate() {
-            let mut encoder = context
-                .device()
-                .create_command_encoder(&CommandEncoderDescriptor {
-                    label: Some(&format!("Simulation Command Encoder for Chunk #{idx}")),
-                });
+        let commands =
+            self.point_bind_groups
+                .iter()
+                .enumerate()
+                .map(|(idx, &(ref point_bind_group, len))| {
+                    let mut encoder =
+                        context
+                            .device()
+                            .create_command_encoder(&CommandEncoderDescriptor {
+                                label: Some(&format!(
+                                    "Simulation Command Encoder for Chunk #{idx}"
+                                )),
+                            });
 
-            {
-                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some(&format!("Simulation Compute Pass for Chunk #{idx}")),
-                    timestamp_writes: None,
-                });
-
-                compute_pass.set_pipeline(&self.pipeline);
-                compute_pass.set_bind_group(0, &self.map_bind_group, &[]);
-                compute_pass.set_bind_group(1, point_bind_group, &[]);
-                compute_pass.dispatch_workgroups(len, 1, 1);
-            }
-
-            context.queue().submit(iter::once(encoder.finish()));
-        }
-
-        let futures = self
-            .point_bind_group
-            .iter()
-            .enumerate()
-            .map(|(idx, &(ref point_bind_group, len))| {
-                let mut encoder =
-                    context
-                        .device()
-                        .create_command_encoder(&CommandEncoderDescriptor {
-                            label: Some(&format!("Simulation Command Encoder for Chunk #{idx}")),
+                    {
+                        let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some(&format!("Simulation Compute Pass for Chunk #{idx}")),
+                            timestamp_writes: None,
                         });
 
-                {
-                    let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some(&format!("Simulation Compute Pass for Chunk #{idx}")),
-                        timestamp_writes: None,
-                    });
+                        compute_pass.set_pipeline(&self.pipeline);
+                        compute_pass.set_bind_group(0, &self.map_bind_group, &[]);
+                        compute_pass.set_bind_group(1, point_bind_group, &[]);
+                        compute_pass.dispatch_workgroups(len, 1, 1);
+                    }
 
-                    compute_pass.set_pipeline(&self.pipeline);
-                    compute_pass.set_bind_group(0, &self.map_bind_group, &[]);
-                    compute_pass.set_bind_group(1, point_bind_group, &[]);
-                    compute_pass.dispatch_workgroups(len, 1, 1);
-                }
+                    encoder.finish()
+                });
 
-                context.queue().submit(iter::once(encoder.finish()))
-            })
-            .collect_vec();
-
-        futures::future::join_all(futures).then(|_| async {})
+        context.queue().submit(commands)
     }
 
     pub fn points(&self) -> &P {

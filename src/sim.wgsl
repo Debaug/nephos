@@ -2,7 +2,7 @@
 @group(0) @binding(1) var<storage> map_indices: array<u32>;
 @group(1) @binding(0) var<storage, read_write> points: array<vec2<f32>>;
 
-@compute @workgroup_size(1) fn kernel(
+@compute @workgroup_size(1) fn step_sim(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
     let point = points[id.x];

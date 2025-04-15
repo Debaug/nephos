@@ -24,8 +24,8 @@ use winit::{dpi::LogicalSize, event::WindowEvent, window::WindowAttributes};
 use crate::{
     app::{self, Context, LocalAppController, Run},
     buffer::Buffer,
-    map::{Map, Maps, Sierpinski},
-    render::Renderer,
+    map::*,
+    render::{Camera, Renderer},
     sim::{Point, Simulation},
 };
 
@@ -72,7 +72,8 @@ impl Cli {
             .transpose()?;
 
         Run::new(AppBuilder {
-            maps: Sierpinski.into_maps(),
+            region: Barnsley.region(),
+            maps: Barnsley.maps(),
             n_points: self.n_points,
             delta_time: Duration::from_millis(self.delta_time_ms),
             record,
@@ -85,6 +86,7 @@ impl Cli {
 }
 
 struct AppBuilder {
+    region: Rect,
     maps: Vec<Map>,
     n_points: usize,
     delta_time: Duration,
@@ -101,6 +103,7 @@ struct RecordConfig {
 struct App {
     simulation: Arc<Simulation<Buffer<Point>>>,
     renderer: Renderer,
+    camera: Arc<Camera>,
     stop_simulation_tx: mpsc::Sender<()>,
 }
 
@@ -125,9 +128,14 @@ impl app::AppBuilder for AppBuilder {
     ) -> BoxFuture<'static, Result<Self::App>> {
         env_logger::init();
 
+        let transform = self.region.to_clip_transform();
+
         let mut rng = rand::rng();
         let points: Vec<_> = iter::repeat_with(|| Point {
-            position: Vec2::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)),
+            position: transform.transform_point2(Vec2::new(
+                rng.random_range(-1.0..=1.0),
+                rng.random_range(-1.0..=1.0),
+            )),
         })
         .take(self.n_points)
         .collect();
@@ -141,6 +149,7 @@ impl app::AppBuilder for AppBuilder {
 
         let simulation = Arc::new(Simulation::new(point_buffer, &self.maps, context.borrow()));
         let renderer = Renderer::new(context.borrow(), surface_configuration.format);
+        let camera = Arc::new(Camera::new(transform, context.borrow()));
 
         let mut record = self.record.map(
             |RecordConfig {
@@ -194,20 +203,37 @@ impl app::AppBuilder for AppBuilder {
         let (stop_simulation_tx, stop_simulation_rx) = mpsc::channel();
         let simulation2 = simulation.clone();
         let context2 = context.to_static();
+        let camera2 = camera.clone();
 
         context.borrow().runtime().spawn(async move {
             let context = context2;
             let simulation = simulation2;
 
-            if let Some(record) = &mut record {
+            let mut gen_iter = if let Some(record) = &mut record {
                 record
                     .encoder
                     .set_repeat(gif::Repeat::Infinite)
                     .expect("failed to set repeating behavior of GIF");
-            }
+
+                drop(record.renderer.render(
+                    simulation.points(),
+                    &camera2,
+                    &record.texture_view,
+                    context.borrow(),
+                ));
+
+                record
+                    .write_frame(self.delta_time, context.borrow())
+                    .await
+                    .expect("failed to write frame");
+
+                Some(0..record.n_gens)
+            } else {
+                None
+            };
 
             let mut interval = tokio::time::interval(self.delta_time);
-            let mut gen_iter = record.as_ref().map(|record| 0..record.n_gens);
+
             while stop_simulation_rx.try_recv() == Err(TryRecvError::Empty)
                 && gen_iter.as_mut().is_none_or(|gen| gen.next().is_some())
             {
@@ -220,64 +246,71 @@ impl app::AppBuilder for AppBuilder {
 
                 drop(record.renderer.render(
                     simulation.points(),
+                    &camera2,
                     &record.texture_view,
                     context.borrow(),
                 ));
 
-                let mut copy_encoder =
-                    context
-                        .device()
-                        .create_command_encoder(&CommandEncoderDescriptor {
-                            label: Some("Texture to Buffer command encoder"),
-                        });
-                copy_encoder.copy_texture_to_buffer(
-                    TexelCopyTextureInfo {
-                        texture: &record.texture,
-                        mip_level: 0,
-                        aspect: wgpu::TextureAspect::All,
-                        origin: Origin3d::ZERO,
-                    },
-                    TexelCopyBufferInfo {
-                        buffer: &record.buffer,
-                        layout: TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(512 * 4),
-                            rows_per_image: None,
-                        },
-                    },
-                    Extent3d {
-                        width: 512,
-                        height: 512,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                context.queue().submit(iter::once(copy_encoder.finish()));
-
-                let slice = record.buffer.slice(..);
-                slice
-                    .map_async(wgpu::MapMode::Read)
-                    .await
-                    .expect("failed to map buffer");
-                let mut bytes = slice.get_mapped_range().to_vec();
-                record.buffer.unmap();
-
-                let mut frame = gif::Frame::from_rgba(record.width, record.height, &mut bytes);
-                frame.delay = (self.delta_time.as_millis() / 10).try_into().unwrap();
-
                 record
-                    .encoder
-                    .write_frame(&frame)
-                    .expect("failed to encode GIF frame");
+                    .write_frame(self.delta_time, context.borrow())
+                    .await
+                    .expect("failed to write frame");
             }
         });
 
         let app = App {
             simulation,
             renderer,
+            camera,
             stop_simulation_tx,
         };
 
         Box::pin(async move { Ok(app) })
+    }
+}
+
+impl Record {
+    async fn write_frame(&mut self, delay: Duration, context: Context<'_>) -> Result<()> {
+        let mut copy_encoder = context
+            .device()
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Texture to Buffer command encoder"),
+            });
+        copy_encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                aspect: wgpu::TextureAspect::All,
+                origin: Origin3d::ZERO,
+            },
+            TexelCopyBufferInfo {
+                buffer: &self.buffer,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(512 * 4),
+                    rows_per_image: None,
+                },
+            },
+            Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
+        );
+        context.queue().submit(iter::once(copy_encoder.finish()));
+
+        let slice = self.buffer.slice(..);
+        slice
+            .map_async(wgpu::MapMode::Read)
+            .await
+            .expect("failed to map buffer");
+        let mut bytes = slice.get_mapped_range().to_vec();
+        self.buffer.unmap();
+
+        let mut frame = gif::Frame::from_rgba(self.width, self.height, &mut bytes);
+        frame.delay = (delay.as_millis() / 10).try_into().unwrap();
+
+        Ok(self.encoder.write_frame(&frame)?)
     }
 }
 
@@ -304,10 +337,12 @@ impl app::App for App {
     }
 
     fn render(&mut self, target: &wgpu::SurfaceTexture, context: app::Context) -> Result<()> {
-        drop(
-            self.renderer
-                .render(self.simulation.points(), target, context.borrow()),
-        );
+        drop(self.renderer.render(
+            self.simulation.points(),
+            &self.camera,
+            target,
+            context.borrow(),
+        ));
 
         Ok(())
     }

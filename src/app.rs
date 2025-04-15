@@ -189,7 +189,6 @@ impl<A: AppBuilder> Run<A> {
 enum AppContainer<A: AppBuilder> {
     Error,
     Created(CreatedApp<A>),
-    // Spawned(Receiver<Result<ReadyAppContainer<A::App>>>),
     Ready(ReadyAppContainer<A::App>),
 }
 
