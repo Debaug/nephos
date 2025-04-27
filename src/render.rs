@@ -1,4 +1,4 @@
-use std::{borrow::Cow, future::Future, iter, mem, sync::OnceLock};
+use std::{borrow::Cow, iter, mem, sync::OnceLock};
 
 use glam::{Affine2, Mat3};
 use wgpu::{
@@ -108,42 +108,52 @@ impl Renderer {
         Self { pipeline }
     }
 
-    pub fn render<T: RenderTarget + Clone>(
+    pub fn render<T: RenderTarget>(
         &self,
         points: &Buffer<Point>,
         camera: &Camera,
         target: &T,
         context: Context,
-    ) -> impl Future<Output = ()> + 'static {
-        let texture_view = target.texture_view();
+    ) -> wgpu_async::WgpuFuture<()> {
+        self.render_all(iter::once((points, camera, target)), context)
+    }
 
-        let mut encoder = context
-            .device()
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Render Command Encoder"),
-            });
+    pub fn render_all<'pts, 'cam, 'tgt, T: RenderTarget>(
+        &self,
+        jobs: impl Iterator<Item = (&'pts Buffer<Point>, &'cam Camera, &'tgt T)>,
+        context: Context,
+    ) -> wgpu_async::WgpuFuture<()> {
+        let commands = jobs.map(|(points, camera, target)| {
+            let texture_view = target.texture_view();
 
-        {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture_view,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(Color::BLACK),
-                        store: StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
+            let mut encoder = context
+                .device()
+                .create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("Render Command Encoder"),
+                });
+            {
+                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &texture_view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::BLACK),
+                            store: StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
 
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_vertex_buffer(0, *points.slice(..));
-            render_pass.set_bind_group(0, &camera.bind_group, &[]);
-            render_pass.draw(0..points.len_u32(), 0..1);
-        }
+                render_pass.set_pipeline(&self.pipeline);
+                render_pass.set_vertex_buffer(0, *points.slice(..));
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.draw(0..points.len_u32(), 0..1);
+            }
+            encoder.finish()
+        });
 
-        context.queue().submit(iter::once(encoder.finish()))
+        context.queue().submit(commands)
     }
 }
 
@@ -175,7 +185,7 @@ impl Camera {
     pub fn new(transform: Affine2, context: Context) -> Self {
         let mat = [WgpuMat3x3::from(Mat3::from(transform.inverse()))];
         let bytes = bytemuck::cast_slice(&mat);
-        let buffer = Buffer::new(
+        let buffer = Buffer::from_data(
             bytes,
             Some("Camera Buffer"),
             BufferUsages::UNIFORM,
@@ -195,5 +205,11 @@ impl Camera {
             _buffer: buffer,
             bind_group,
         }
+    }
+}
+
+impl AsRef<Camera> for Camera {
+    fn as_ref(&self) -> &Camera {
+        self
     }
 }

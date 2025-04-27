@@ -5,6 +5,7 @@ use color_eyre::eyre::Result;
 pub mod app;
 pub mod apps;
 pub mod buffer;
+pub mod image;
 pub mod map;
 pub mod render;
 pub mod sim;

@@ -12,5 +12,5 @@
 }
 
 fn hash(point: vec2<f32>) -> u32 {
-    return bitcast<u32>(point.x * point.y);
+    return bitcast<u32>(point.x + point.y);
 }

@@ -12,7 +12,7 @@ use std::{
 use clap::Parser;
 use color_eyre::eyre::{Ok, Result};
 use futures::future::BoxFuture;
-use glam::Vec2;
+use glam::{vec2, Affine2, Vec2};
 use rand::Rng;
 use wgpu::{
     BufferUsages, CommandEncoderDescriptor, Extent3d, Origin3d, SurfaceConfiguration,
@@ -27,6 +27,7 @@ use crate::{
     map::*,
     render::{Camera, Renderer},
     sim::{Point, Simulation},
+    util::Affine2Ext,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -57,8 +58,8 @@ impl Cli {
 
                 let n_gens = self.n_gens.unwrap();
 
-                let width = 512;
-                let height = 512;
+                let width = TEXTURE_DIM as u16;
+                let height = TEXTURE_DIM as u16;
 
                 let encoder = gif::Encoder::new(file, width, height, &[])?;
 
@@ -71,19 +72,54 @@ impl Cli {
             })
             .transpose()?;
 
+        // let maps = vec![
+        //     Affine2::from_scale_angle_translation(vec2(0.5, 0.5), 0.0, Vec2::ZERO)
+        //         .with_center(vec2(0.5, 0.0))
+        //         .into(),
+        //     Affine2::from_scale_angle_translation(vec2(0.4, 0.4), 0.6, Vec2::ZERO).into(),
+        //     Affine2::from_scale_angle_translation(vec2(0.6, 0.4), 0.4, Vec2::ZERO)
+        //         .with_center(vec2(0.0, 0.5))
+        //         .into(),
+        // ];
+        // let maps = vec![Affine2::from_scale(Vec2::splat(0.5_f32.powf(0.025)))
+        //     .with_center(vec2(0.0, 1.0))
+        //     .into()];
+        // let maps = vec![Affine2::from_angle(f32::consts::FRAC_PI_8).into()];
+        // let maps = vec![
+        //     Affine2::from_scale(vec2(0.5, 0.5))
+        //         .with_center(vec2(-1.0, -1.0))
+        //         .into(),
+        //     Affine2::from_scale(vec2(0.5, 0.5))
+        //         .with_center(vec2(-1.0, 1.0))
+        //         .into(),
+        //     Affine2::from_scale(vec2(0.5, 0.5))
+        //         .with_center(vec2(1.0, -1.0))
+        //         .into(),
+        //     Affine2::from_scale(vec2(0.5, 0.5))
+        //         .with_center(vec2(1.0, 1.0))
+        //         .into(),
+        // ];
+
+        let maps = Pentagon.maps();
+
         Run::new(AppBuilder {
-            region: Barnsley.region(),
-            maps: Barnsley.maps(),
+            region: Rect {
+                min: Vec2::NEG_ONE,
+                max: Vec2::ONE,
+            },
+            maps,
             n_points: self.n_points,
             delta_time: Duration::from_millis(self.delta_time_ms),
             record,
         })
         .with_window_attributes(
-            WindowAttributes::default().with_inner_size(LogicalSize::new(600, 600)),
+            WindowAttributes::default().with_inner_size(LogicalSize::new(800, 800)),
         )
         .run()
     }
 }
+
+const TEXTURE_DIM: usize = 64;
 
 struct AppBuilder {
     region: Rect,
@@ -139,8 +175,16 @@ impl app::AppBuilder for AppBuilder {
         })
         .take(self.n_points)
         .collect();
+        // let points: Vec<_> = iter::repeat_with(|| Point {
+        //     position: transform.transform_point2(Vec2::new(
+        //         rng.random_range(-1.0e-5..=1.0e-5),
+        //         rng.random_range(-1.0e-5..=1.0e-5),
+        //     )),
+        // })
+        // .take(self.n_points)
+        // .collect();
 
-        let point_buffer = Buffer::new(
+        let point_buffer = Buffer::from_data(
             &points,
             Some("Points"),
             BufferUsages::STORAGE | BufferUsages::VERTEX,
@@ -178,8 +222,8 @@ impl app::AppBuilder for AppBuilder {
                     ..Default::default()
                 });
 
-                let buffer = Buffer::new(
-                    &vec![0; 512 * 512 * 4],
+                let buffer = Buffer::from_data(
+                    &vec![0; TEXTURE_DIM * TEXTURE_DIM * 4],
                     Some("Simulation Texture Buffer"),
                     BufferUsages::MAP_READ | BufferUsages::COPY_DST,
                     context.borrow(),
@@ -287,13 +331,13 @@ impl Record {
                 buffer: &self.buffer,
                 layout: TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(512 * 4),
+                    bytes_per_row: Some(TEXTURE_DIM as u32 * 4),
                     rows_per_image: None,
                 },
             },
             Extent3d {
-                width: 512,
-                height: 512,
+                width: TEXTURE_DIM as u32,
+                height: TEXTURE_DIM as u32,
                 depth_or_array_layers: 1,
             },
         );
@@ -313,8 +357,6 @@ impl Record {
         Ok(self.encoder.write_frame(&frame)?)
     }
 }
-
-impl App {}
 
 impl Drop for App {
     fn drop(&mut self) {

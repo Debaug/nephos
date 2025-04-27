@@ -1,4 +1,4 @@
-use std::{future::Future, iter, mem, num::NonZero};
+use std::{iter, mem, num::NonZero};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec2};
@@ -12,7 +12,12 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderStages,
 };
 
-use crate::{app::Context, buffer::Buffer, map::Map, util::WgpuMat3x3};
+use crate::{
+    app::Context,
+    buffer::Buffer,
+    map::Map,
+    util::{SyncingFuture, WgpuMat3x3},
+};
 
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
 #[repr(C)]
@@ -44,7 +49,7 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
                 WgpuMat3x3::from(mat)
             })
             .collect();
-        let map_buffer = Buffer::new(
+        let map_buffer = Buffer::from_data(
             &maps_gpu_repr,
             Some("Maps"),
             BufferUsages::STORAGE,
@@ -67,7 +72,7 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
             .enumerate()
             .flat_map(|(i, (p, q))| iter::repeat_n(i as u32, q - p))
             .collect();
-        let map_indices = Buffer::new(
+        let map_indices = Buffer::from_data(
             &map_index_array,
             Some("Map Indices"),
             BufferUsages::STORAGE,
@@ -226,7 +231,7 @@ impl<P: AsRef<Buffer<Point>>> Simulation<P> {
         (point_bind_group_layout, point_bind_groups)
     }
 
-    pub fn step(&self, context: Context<'_>) -> impl Future<Output = ()> + 'static {
+    pub fn step(&self, context: Context<'_>) -> impl SyncingFuture {
         let commands =
             self.point_bind_groups
                 .iter()

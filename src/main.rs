@@ -1,7 +1,7 @@
 use clap::Parser;
 use color_eyre::eyre::Result;
-use nephos::Cli;
-
+use nephos::apps::basic;
 fn main() -> Result<()> {
-    Cli::try_parse()?.run()
+    basic::Cli::try_parse()?.run()
+    // nephos::apps::fit::Cli::try_parse()?.run()
 }

@@ -19,4 +19,5 @@ thiserror = "2.0.12"
 tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread", "time"] }
 wgpu = "24.0.3"
 wgpu-async = "24.0.3"
+wgsl_preprocessor = { path = "wgsl_preprocessor" }
 winit = "0.30.9"

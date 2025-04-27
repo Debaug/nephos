@@ -1,8 +1,8 @@
 use std::f32;
 
-use glam::{vec2, Affine2, Vec2};
+use glam::{vec2, Affine2, Mat2, Vec2};
 
-use crate::util::mat2;
+use crate::util::{mat2, Affine2Ext};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Map {
@@ -186,5 +186,124 @@ impl Maps for Disc {
             Affine2::from_angle(3.88).into(),
             Affine2::from_angle(-2.0).into(),
         ]
+    }
+}
+
+pub struct Pipistrello;
+
+impl Maps for Pipistrello {
+    fn maps(&self) -> Vec<Map> {
+        vec![
+            Affine2::from_scale(vec2(0.25, 0.5))
+                .with_center(vec2(0.0, -0.75))
+                .into(),
+            Affine2::from_scale_angle_translation(
+                vec2(0.5, 0.5),
+                f32::consts::FRAC_PI_3,
+                Vec2::ZERO,
+            )
+            .with_center(vec2(-0.5, -0.5))
+            .into(),
+            Affine2::from_scale_angle_translation(
+                vec2(0.67, 0.9),
+                f32::consts::FRAC_PI_4,
+                Vec2::ZERO,
+            )
+            .with_center(vec2(0.25, 0.25))
+            .into(),
+        ]
+    }
+}
+
+pub struct Tunnel;
+
+impl Maps for Tunnel {
+    fn maps(&self) -> Vec<Map> {
+        let mid = Affine2::from_mat2(mat2(
+            0.5, -0.5, //
+            0.5, 0.5,
+        ));
+        let side = Affine2::from_scale_angle_translation(vec2(0.25, 0.5), 0.0, vec2(0.75, 0.0));
+        vec![
+            mid.into(),
+            side.into(),
+            (Affine2::from_angle(f32::consts::FRAC_PI_2) * side).into(),
+            (Affine2::from_angle(f32::consts::PI) * side).into(),
+            (Affine2::from_angle(-f32::consts::FRAC_PI_2) * side).into(),
+        ]
+    }
+}
+
+pub struct Weed;
+
+impl Maps for Weed {
+    fn maps(&self) -> Vec<Map> {
+        let stem = Affine2::from_mat2_translation(
+            mat2(
+                0.0, 0.0, //
+                0.0, 0.05,
+            ),
+            vec2(0.0, -0.95),
+        );
+
+        let up = Affine2::from_scale_angle_translation(vec2(0.9, 0.9), 0.0, vec2(0.0, 0.55));
+
+        let left = Affine2::from_scale_angle_translation(
+            vec2(0.5, 0.5),
+            f32::consts::FRAC_PI_3,
+            vec2(0.0, -0.9),
+        ) * Affine2::from_translation(vec2(0.0, 0.5));
+
+        let right = Affine2::from_mat2(mat2(
+            -1.0, 0.0, //
+            0.0, 1.0,
+        )) * left;
+
+        vec![stem.into(), up.into(), left.into(), right.into()]
+    }
+}
+
+// Made with Tiziano Piserchia
+pub struct FleurAstrale;
+
+impl Maps for FleurAstrale {
+    fn maps(&self) -> Vec<Map> {
+        let corner = Affine2 {
+            matrix2: Mat2::from_diagonal(Vec2::splat(0.3)),
+            translation: vec2(0.67, 0.67),
+        };
+        let corner2 = Affine2::from_mat2(mat2(
+            -1.0, 0.0, //
+            0.0, 1.0,
+        )) * corner;
+        vec![
+            Affine2::from_scale_angle_translation(
+                vec2(0.67, 0.67),
+                f32::consts::FRAC_PI_4,
+                Vec2::ZERO,
+            )
+            .into(),
+            corner.into(),
+            corner2.into(),
+            (Affine2::from_mat2(-Mat2::IDENTITY) * corner).into(),
+            (Affine2::from_mat2(-Mat2::IDENTITY) * corner2).into(),
+        ]
+    }
+}
+
+pub struct Pentagon;
+
+impl Maps for Pentagon {
+    fn maps(&self) -> Vec<Map> {
+        // let tr1 = Affine2::from_scale_angle_translation(Vec2::splat(0.5), 0.0, vec2(0.0, 0.5));
+        (0..5)
+            .map(|i| {
+                let angle = f32::consts::TAU / 5.0 * i as f32;
+                let center = Mat2::from_angle(angle) * vec2(0.0, 0.80);
+                Affine2::from_scale(vec2(0.5, 0.5))
+                    .with_center(center)
+                    .into()
+            })
+            .collect()
     }
 }
